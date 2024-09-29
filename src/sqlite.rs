@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use sqlx::{sqlite::SqliteRow, FromRow, QueryBuilder};
+use sqlx::{sqlite::SqliteRow, FromRow};
 
 use crate::{BasicType, ColumnValueMap};
 
@@ -123,6 +123,68 @@ pub trait SqliteModel {
         Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
     {
         let query_str = format!("select * from {} where {} = ?", Self::table_name(), col);
+        Ok(match val {
+            BasicType::Null => {
+                sqlx::query_as(&query_str)
+                    .bind(Option::<String>::None)
+                    .fetch_one(pool)
+                    .await?
+            }
+            BasicType::Integer(a) => {
+                sqlx::query_as(&query_str)
+                    .bind(a)
+                    .bind(Option::<String>::None)
+                    .fetch_one(pool)
+                    .await?
+            }
+            BasicType::Real(a) => {
+                sqlx::query_as(&query_str)
+                    .bind(a)
+                    .bind(Option::<String>::None)
+                    .fetch_one(pool)
+                    .await?
+            }
+            BasicType::Text(a) => {
+                sqlx::query_as(&query_str)
+                    .bind(a)
+                    .bind(Option::<String>::None)
+                    .fetch_one(pool)
+                    .await?
+            }
+            BasicType::Blob(a) => {
+                sqlx::query_as(&query_str)
+                    .bind(a)
+                    .bind(Option::<String>::None)
+                    .fetch_one(pool)
+                    .await?
+            }
+        })
+    }
+    /// Deletes a single record from the table based on the specified column and value and returns the deleted model instance.
+    ///
+    /// # Arguments
+    /// - `pool`: A reference to a `sqlx::SqlitePool` used for database interaction.
+    /// - `col`: The name of the column to filter by.
+    /// - `val`: The value to filter by, wrapped in `BasicType`.
+    ///
+    /// # Returns
+    /// - `Result<Self, Self::Error>`: Returns the deleted model instance on success, otherwise returns an error.
+    ///
+    /// # Errors
+    /// - Returns `Self::Error` if the database operation fails or if no record matches the filter.
+    async fn delete_one(
+        pool: &sqlx::SqlitePool,
+        col: &str,
+        val: BasicType,
+    ) -> Result<Self, Self::Error>
+    where
+        Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
+    {
+        let query_str = format!(
+            "delete from {} where {} = ? returning *;",
+            Self::table_name(),
+            col
+        );
         Ok(match val {
             BasicType::Null => {
                 sqlx::query_as(&query_str)
@@ -332,5 +394,44 @@ mod tests {
         assert_eq!(res.name, test.name);
         assert_eq!(res.passwd, test.passwd);
         assert_eq!(res.created_at, test.created_at);
+    }
+    #[tokio::test]
+    async fn test_delete_one() {
+        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+        TestModel::create_table(&pool).await.unwrap();
+        let test = TestModel {
+            id: 18,
+            name: "Test".to_string(),
+            passwd: "password".to_string(),
+            created_at: 1,
+        };
+        let test1 = TestModel {
+            id: 18,
+            name: "Test".to_string(),
+            passwd: "Password".to_string(),
+            created_at: 2,
+        };
+        test.upsert(&pool, &["id"], "id").await.unwrap();
+        test1.upsert(&pool, &["id"], "id").await.unwrap();
+
+        let res = TestModel::delete_one(&pool, "id", BasicType::Integer(1))
+            .await
+            .unwrap();
+        assert_eq!(res.id, 1);
+        assert_eq!(res.name, test.name);
+        assert_eq!(res.passwd, test.passwd);
+        assert_eq!(res.created_at, test.created_at);
+
+        let res: Vec<TestModel> = sqlx::query_as("select * from TestModel")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(res.len(), 1);
+        let res2 = res.get(0).unwrap();
+        assert_eq!(res2.id, 2);
+        assert_eq!(res2.name, test1.name);
+        assert_eq!(res2.passwd, test1.passwd);
+        assert_eq!(res2.created_at, test1.created_at);
     }
 }
