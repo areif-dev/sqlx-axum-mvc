@@ -5,16 +5,48 @@ use crate::{BasicType, ColumnValueMap};
 
 #[async_trait]
 pub trait SqliteModel {
+    /// Custom error type for the model, which must implement the standard `Error` trait and be convertible from `sqlx::Error`
     type Error: std::error::Error + From<sqlx::Error>;
 
+    /// Returns the table name associated with the model.
+    ///
+    /// # Returns
+    /// A `String` representing the table name.
     fn table_name() -> String;
 
+    /// Maps the model's columns to their corresponding values.
+    ///
+    /// # Returns
+    /// - A `ColumnValueMap` where each key is a column name and each value is a `BasicType`.
     fn map_cols_to_vals(&self) -> ColumnValueMap;
 
+    /// Creates the corresponding table for the model in the database.
+    ///
+    /// # Arguments
+    /// - `pool`: A reference to a `sqlx::SqlitePool` used for database interaction.
+    ///
+    /// # Returns
+    /// - `Result<(), Self::Error>`: Returns `Ok` if the table is created successfully, otherwise returns an error.
+    ///
+    /// # Errors
+    /// - Returns `Self::Error` if the database operation fails.
     async fn create_table(pool: &sqlx::SqlitePool) -> Result<(), Self::Error>
     where
         Self: Sized;
 
+    /// Inserts a new record into the table and returns the newly created model instance.
+    ///
+    /// # Arguments
+    /// - `pool`: A reference to a `sqlx::SqlitePool` used for database interaction.
+    /// - `skip_cols`: A list of column names to skip during the insertion. This can be useful for
+    /// skipping columns that you would like to be set to their default value by the database. Eg
+    /// automatically setting and incrementing the primary key.
+    ///
+    /// # Returns
+    /// - `Result<Self, Self::Error>`: Returns the newly inserted model instance on success, otherwise returns an error.
+    ///
+    /// # Errors
+    /// - Returns `Self::Error` if the database operation fails.
     async fn insert(&self, pool: &sqlx::SqlitePool, skip_cols: &[&str]) -> Result<Self, Self::Error>
     where
         Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
@@ -59,6 +91,20 @@ pub trait SqliteModel {
         Ok(query.fetch_one(pool).await?)
     }
 
+    /// Inserts or updates a record in the table depending on whether a conflict occurs on a specific column.
+    ///
+    /// # Arguments
+    /// - `pool`: A reference to a `sqlx::SqlitePool` used for database interaction.
+    /// - `skip_cols`: A list of column names to skip during the insertion. This can be useful for
+    /// skipping columns that you would like to be set to their default value by the database. Eg
+    /// automatically setting and incrementing the primary key.
+    /// - `conflict_col`: The name of the column to check for conflicts (usually the primary key).
+    ///
+    /// # Returns
+    /// - `Result<Self, Self::Error>`: Returns the upserted model instance on success, otherwise returns an error.
+    ///
+    /// # Errors
+    /// - Returns `Self::Error` if the database operation fails.
     async fn upsert(
         &self,
         pool: &sqlx::SqlitePool,
@@ -114,6 +160,19 @@ pub trait SqliteModel {
         Ok(query.fetch_one(pool).await?)
     }
 
+    /// Selects a single record from the table based on the specified column and value.
+    ///
+    /// # Arguments
+    /// - `pool`: A reference to a `sqlx::SqlitePool` used for database interaction.
+    /// - `col`: The name of the column to filter by.
+    /// - `val`: The value to filter by, wrapped in `BasicType`.
+    ///
+    /// # Returns
+    /// - `Result<Self, Self::Error>`: Returns the selected model instance on success, otherwise returns an error.
+    ///
+    /// # Errors
+    /// - Returns `Self::Error` if the database operation fails or if no record matches the filter
+    /// or some other `sqlx::Error` occurs.
     async fn select_one(
         pool: &sqlx::SqlitePool,
         col: &str,
