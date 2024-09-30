@@ -1,22 +1,8 @@
 mod sqlite;
 
-pub use sqlite::SqliteModel;
+pub use sqlite::DbModel as SqliteDbModel;
 
-use std::{
-    collections::HashMap,
-    fmt::{Debug, Display},
-};
-
-#[derive(Debug)]
-pub struct ConvertBasicTypeError(String);
-
-impl Display for ConvertBasicTypeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for ConvertBasicTypeError {}
+use std::collections::HashMap;
 
 pub enum BasicType {
     Null,
