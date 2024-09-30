@@ -181,7 +181,11 @@ pub trait DbModel {
     where
         Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
     {
-        let query_str = format!("select * from {} where {} = ?", Self::table_name(), col);
+        let query_str = format!(
+            "select * from {} where {} = ? limit 1;",
+            Self::table_name(),
+            col
+        );
         Ok(match val {
             BasicType::Null => {
                 sqlx::query_as(&query_str)
@@ -241,7 +245,7 @@ pub trait DbModel {
     where
         Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
     {
-        let query_str = format!("select * from {} where {} = ?", Self::table_name(), col);
+        let query_str = format!("select * from {} where {} = ?;", Self::table_name(), col);
         Ok(match val {
             BasicType::Null => {
                 sqlx::query_as(&query_str)
@@ -288,74 +292,11 @@ pub trait DbModel {
     /// - val: The value to filter by, wrapped in BasicType.
     ///
     /// # Returns
-    /// - Result<Self, Self::Error>: Returns the deleted model instance on success, otherwise returns an error.
+    /// - Result<Vec<Self>, Self::Error>: Returns the deleted model instance on success, otherwise returns an error.
     ///
     /// # Errors
     /// - Returns Self::Error if the database operation fails or if no record matches the filter.
-    async fn delete_one(
-        pool: &sqlx::SqlitePool,
-        col: &str,
-        val: BasicType,
-    ) -> Result<Self, Self::Error>
-    where
-        Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
-    {
-        let query_str = format!(
-            "delete from {} where {} = ? returning *;",
-            Self::table_name(),
-            col
-        );
-        Ok(match val {
-            BasicType::Null => {
-                sqlx::query_as(&query_str)
-                    .bind(Option::<String>::None)
-                    .fetch_one(pool)
-                    .await?
-            }
-            BasicType::Integer(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_one(pool)
-                    .await?
-            }
-            BasicType::Real(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_one(pool)
-                    .await?
-            }
-            BasicType::Text(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_one(pool)
-                    .await?
-            }
-            BasicType::Blob(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_one(pool)
-                    .await?
-            }
-        })
-    }
-
-    /// Deletes multiple records from the table filterd by a specified column and value and returns the deleted model instances.
-    ///
-    /// # Arguments
-    /// - pool: A reference to a sqlx::SqlitePool used for database interaction.
-    /// - col: The name of the column to filter by.
-    /// - val: The value to filter by, wrapped in BasicType.
-    ///
-    /// # Returns
-    /// - Result<Vec<Self>, Self::Error>: Returns a vector of deleted model instances on success, otherwise returns an error.
-    ///
-    /// # Errors
-    /// - Returns Self::Error if the database operation fails.
-    async fn delete_many(
+    async fn delete(
         pool: &sqlx::SqlitePool,
         col: &str,
         val: BasicType,
@@ -368,42 +309,15 @@ pub trait DbModel {
             Self::table_name(),
             col
         );
-        Ok(match val {
-            BasicType::Null => {
-                sqlx::query_as(&query_str)
-                    .bind(Option::<String>::None)
-                    .fetch_all(pool)
-                    .await?
-            }
-            BasicType::Integer(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_all(pool)
-                    .await?
-            }
-            BasicType::Real(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_all(pool)
-                    .await?
-            }
-            BasicType::Text(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_all(pool)
-                    .await?
-            }
-            BasicType::Blob(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_all(pool)
-                    .await?
-            }
-        })
+        let query = sqlx::query_as(&query_str);
+        let query = match val {
+            BasicType::Null => query.bind(Option::<String>::None),
+            BasicType::Integer(a) => query.bind(a),
+            BasicType::Real(a) => query.bind(a),
+            BasicType::Text(a) => query.bind(a),
+            BasicType::Blob(a) => query.bind(a),
+        };
+        Ok(query.fetch_all(pool).await?)
     }
 }
 
@@ -619,7 +533,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_one() {
+    async fn test_delete() {
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
         TestModel::create_table(&pool).await.unwrap();
         let test = TestModel {
@@ -637,9 +551,11 @@ mod tests {
         test.upsert(&pool, &["id"], "id").await.unwrap();
         test1.upsert(&pool, &["id"], "id").await.unwrap();
 
-        let res = TestModel::delete_one(&pool, "id", BasicType::Integer(1))
+        let res = TestModel::delete(&pool, "id", BasicType::Integer(1))
             .await
             .unwrap();
+        assert_eq!(res.len(), 1);
+        let res = res.get(0).unwrap();
         assert_eq!(res.id, 1);
         assert_eq!(res.name, test.name);
         assert_eq!(res.passwd, test.passwd);
@@ -656,40 +572,28 @@ mod tests {
         assert_eq!(res2.name, test1.name);
         assert_eq!(res2.passwd, test1.passwd);
         assert_eq!(res2.created_at, test1.created_at);
-    }
 
-    #[tokio::test]
-    async fn test_delete_many() {
-        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-        TestModel::create_table(&pool).await.unwrap();
-        let test = TestModel {
+        let test2 = TestModel {
             id: 18,
             name: "Test".to_string(),
-            passwd: "password".to_string(),
-            created_at: 1,
+            passwd: "foobar".to_string(),
+            created_at: 3,
         };
-        let test1 = TestModel {
-            id: 18,
-            name: "Test".to_string(),
-            passwd: "Password".to_string(),
-            created_at: 2,
-        };
-        test.upsert(&pool, &["id"], "id").await.unwrap();
-        test1.upsert(&pool, &["id"], "id").await.unwrap();
+        test2.upsert(&pool, &["id"], "id").await.unwrap();
 
-        let res = TestModel::delete_many(&pool, "name", "Test".into())
+        let res = TestModel::delete(&pool, "name", "Test".into())
             .await
             .unwrap();
         assert_eq!(res.len(), 2);
         let (res1, res2) = (res.get(0).unwrap(), res.get(1).unwrap());
-        assert_eq!(res1.id, 1);
-        assert_eq!(res1.name, test.name);
-        assert_eq!(res1.passwd, test.passwd);
-        assert_eq!(res1.created_at, test.created_at);
-        assert_eq!(res2.id, 2);
-        assert_eq!(res2.name, test1.name);
-        assert_eq!(res2.passwd, test1.passwd);
-        assert_eq!(res2.created_at, test1.created_at);
+        assert_eq!(res1.id, 2);
+        assert_eq!(res1.name, test1.name);
+        assert_eq!(res1.passwd, test1.passwd);
+        assert_eq!(res1.created_at, test1.created_at);
+        assert_eq!(res2.id, 3);
+        assert_eq!(res2.name, test2.name);
+        assert_eq!(res2.passwd, test2.passwd);
+        assert_eq!(res2.created_at, test2.created_at);
 
         let res: Vec<TestModel> = sqlx::query_as("select * from TestModel")
             .fetch_all(&pool)
