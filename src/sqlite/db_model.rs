@@ -3,6 +3,36 @@ use sqlx::{sqlite::SqliteRow, FromRow};
 
 use crate::{BasicType, ColumnValueMap};
 
+fn bind_values<'q, T>(
+    query: sqlx::query::QueryAs<'q, sqlx::Sqlite, T, sqlx::sqlite::SqliteArguments<'q>>,
+    vals: &'q [BasicType],
+) -> sqlx::query::QueryAs<'q, sqlx::Sqlite, T, sqlx::sqlite::SqliteArguments<'q>>
+where
+    T: Send + 'q,
+{
+    let mut query = query;
+    for val in vals {
+        match val {
+            BasicType::Null => {
+                query = query.bind(Option::<String>::None);
+            }
+            BasicType::Integer(i) => {
+                query = query.bind(i);
+            }
+            BasicType::Real(f) => {
+                query = query.bind(f);
+            }
+            BasicType::Text(s) => {
+                query = query.bind(s);
+            }
+            BasicType::Blob(b) => {
+                query = query.bind(b);
+            }
+        }
+    }
+    query
+}
+
 #[async_trait]
 pub trait DbModel {
     /// Custom error type for the model, which must implement the standard Error trait and be convertible from sqlx::Error
@@ -67,27 +97,8 @@ pub trait DbModel {
             column_names.join(","),
             qmarks.join(","),
         );
-
-        let mut query = sqlx::query_as::<sqlx::Sqlite, Self>(&query_str);
-        for val in &ordered_vals {
-            match val {
-                BasicType::Null => {
-                    query = query.bind(Option::<String>::None);
-                }
-                BasicType::Integer(i) => {
-                    query = query.bind(i);
-                }
-                BasicType::Real(f) => {
-                    query = query.bind(f);
-                }
-                BasicType::Text(s) => {
-                    query = query.bind(s);
-                }
-                BasicType::Blob(b) => {
-                    query = query.bind(b);
-                }
-            }
-        }
+        let query = sqlx::query_as::<sqlx::Sqlite, Self>(&query_str);
+        let query = bind_values(query, &ordered_vals);
         Ok(query.fetch_one(pool).await?)
     }
 
@@ -135,28 +146,12 @@ pub trait DbModel {
             update_clause.join(","),
         );
 
-        let mut query = sqlx::query_as::<sqlx::Sqlite, Self>(&query_str);
+        let query = sqlx::query_as::<sqlx::Sqlite, Self>(&query_str);
+        let mut vals = Vec::new();
         for _ in 0..2 {
-            for val in &ordered_vals {
-                match val {
-                    BasicType::Null => {
-                        query = query.bind(Option::<String>::None);
-                    }
-                    BasicType::Integer(i) => {
-                        query = query.bind(i);
-                    }
-                    BasicType::Real(f) => {
-                        query = query.bind(f);
-                    }
-                    BasicType::Text(s) => {
-                        query = query.bind(s);
-                    }
-                    BasicType::Blob(b) => {
-                        query = query.bind(b);
-                    }
-                }
-            }
+            ordered_vals.iter().for_each(|v| vals.push(v.to_owned()));
         }
+        let query = bind_values(query, &vals);
         Ok(query.fetch_one(pool).await?)
     }
 
@@ -186,42 +181,10 @@ pub trait DbModel {
             Self::table_name(),
             col
         );
-        Ok(match val {
-            BasicType::Null => {
-                sqlx::query_as(&query_str)
-                    .bind(Option::<String>::None)
-                    .fetch_one(pool)
-                    .await?
-            }
-            BasicType::Integer(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_one(pool)
-                    .await?
-            }
-            BasicType::Real(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_one(pool)
-                    .await?
-            }
-            BasicType::Text(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_one(pool)
-                    .await?
-            }
-            BasicType::Blob(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_one(pool)
-                    .await?
-            }
-        })
+        let query = sqlx::query_as(&query_str);
+        let vals = vec![val];
+        let query = bind_values(query, &vals);
+        Ok(query.fetch_one(pool).await?)
     }
 
     /// Selects multiple records from the table based on the specified column and value.
@@ -246,42 +209,10 @@ pub trait DbModel {
         Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
     {
         let query_str = format!("select * from {} where {} = ?;", Self::table_name(), col);
-        Ok(match val {
-            BasicType::Null => {
-                sqlx::query_as(&query_str)
-                    .bind(Option::<String>::None)
-                    .fetch_all(pool)
-                    .await?
-            }
-            BasicType::Integer(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_all(pool)
-                    .await?
-            }
-            BasicType::Real(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_all(pool)
-                    .await?
-            }
-            BasicType::Text(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_all(pool)
-                    .await?
-            }
-            BasicType::Blob(a) => {
-                sqlx::query_as(&query_str)
-                    .bind(a)
-                    .bind(Option::<String>::None)
-                    .fetch_all(pool)
-                    .await?
-            }
-        })
+        let query = sqlx::query_as(&query_str);
+        let vals = vec![val];
+        let query = bind_values(query, &vals);
+        Ok(query.fetch_all(pool).await?)
     }
 
     /// Deletes a single record from the table based on the specified column and value and returns the deleted model instance.
@@ -310,13 +241,8 @@ pub trait DbModel {
             col
         );
         let query = sqlx::query_as(&query_str);
-        let query = match val {
-            BasicType::Null => query.bind(Option::<String>::None),
-            BasicType::Integer(a) => query.bind(a),
-            BasicType::Real(a) => query.bind(a),
-            BasicType::Text(a) => query.bind(a),
-            BasicType::Blob(a) => query.bind(a),
-        };
+        let vals = vec![val];
+        let query = bind_values(query, &vals);
         Ok(query.fetch_all(pool).await?)
     }
 }

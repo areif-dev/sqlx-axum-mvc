@@ -4,6 +4,7 @@ pub use sqlite::DbModel as SqliteDbModel;
 
 use std::collections::HashMap;
 
+#[derive(Debug, Clone)]
 pub enum BasicType {
     Null,
     Integer(i64),
