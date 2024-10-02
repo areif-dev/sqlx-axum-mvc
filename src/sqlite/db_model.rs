@@ -4,13 +4,13 @@ use sqlx::{sqlite::SqliteRow, FromRow};
 use crate::{BasicType, ColumnValueMap};
 
 fn bind_values<'q, T>(
-    query: sqlx::query::QueryAs<'q, sqlx::Sqlite, T, sqlx::sqlite::SqliteArguments<'q>>,
+    query_str: &'q str,
     vals: &'q [BasicType],
 ) -> sqlx::query::QueryAs<'q, sqlx::Sqlite, T, sqlx::sqlite::SqliteArguments<'q>>
 where
-    T: Send + 'q,
+    T: Send + 'q + for<'r> FromRow<'r, sqlx::sqlite::SqliteRow>,
 {
-    let mut query = query;
+    let mut query = sqlx::query_as(query_str);
     for val in vals {
         match val {
             BasicType::Null => {
@@ -97,8 +97,7 @@ pub trait DbModel {
             column_names.join(","),
             qmarks.join(","),
         );
-        let query = sqlx::query_as::<sqlx::Sqlite, Self>(&query_str);
-        let query = bind_values(query, &ordered_vals);
+        let query = bind_values(&query_str, &ordered_vals);
         Ok(query.fetch_one(pool).await?)
     }
 
@@ -146,12 +145,11 @@ pub trait DbModel {
             update_clause.join(","),
         );
 
-        let query = sqlx::query_as::<sqlx::Sqlite, Self>(&query_str);
         let mut vals = Vec::new();
         for _ in 0..2 {
             ordered_vals.iter().for_each(|v| vals.push(v.to_owned()));
         }
-        let query = bind_values(query, &vals);
+        let query = bind_values(&query_str, &vals);
         Ok(query.fetch_one(pool).await?)
     }
 
@@ -181,9 +179,8 @@ pub trait DbModel {
             Self::table_name(),
             col
         );
-        let query = sqlx::query_as(&query_str);
         let vals = vec![val];
-        let query = bind_values(query, &vals);
+        let query = bind_values(&query_str, &vals);
         Ok(query.fetch_one(pool).await?)
     }
 
@@ -209,9 +206,8 @@ pub trait DbModel {
         Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
     {
         let query_str = format!("select * from {} where {} = ?;", Self::table_name(), col);
-        let query = sqlx::query_as(&query_str);
         let vals = vec![val];
-        let query = bind_values(query, &vals);
+        let query = bind_values(&query_str, &vals);
         Ok(query.fetch_all(pool).await?)
     }
 
@@ -240,9 +236,8 @@ pub trait DbModel {
             Self::table_name(),
             col
         );
-        let query = sqlx::query_as(&query_str);
         let vals = vec![val];
-        let query = bind_values(query, &vals);
+        let query = bind_values(&query_str, &vals);
         Ok(query.fetch_all(pool).await?)
     }
 }
@@ -250,14 +245,46 @@ pub trait DbModel {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use axum::http::StatusCode;
     use sqlx::prelude::FromRow;
 
     use crate::{BasicType, ColumnValueMap};
 
     use super::DbModel;
 
-    #[derive(FromRow)]
+    #[derive(Debug)]
+    struct Error(sqlx::Error);
 
+    impl std::fmt::Display for Error {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self)
+        }
+    }
+
+    impl std::error::Error for Error {}
+
+    impl From<sqlx::Error> for Error {
+        fn from(value: sqlx::Error) -> Self {
+            Error(value)
+        }
+    }
+
+    impl Into<(StatusCode, String)> for Error {
+        fn into(self) -> (StatusCode, String) {
+            match self.0 {
+                sqlx::Error::RowNotFound => (
+                    StatusCode::NOT_FOUND,
+                    format!("Expected one row, but found none. {:?}", self.0),
+                ),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Database query failed with error: {:?}", self.0),
+                ),
+            }
+        }
+    }
+
+    #[derive(FromRow)]
     struct TestModel {
         pub id: i64,
         pub name: String,
@@ -267,7 +294,7 @@ mod tests {
 
     #[async_trait]
     impl DbModel for TestModel {
-        type Error = sqlx::Error;
+        type Error = Error;
 
         fn table_name() -> String {
             "TestModel".to_string()
