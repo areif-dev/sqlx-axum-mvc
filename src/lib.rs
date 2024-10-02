@@ -14,6 +14,15 @@ pub enum BasicType {
     Blob(Vec<u8>),
 }
 
+impl From<bool> for BasicType {
+    fn from(value: bool) -> Self {
+        match value {
+            true => BasicType::Integer(1),
+            false => BasicType::Integer(0),
+        }
+    }
+}
+
 impl From<i64> for BasicType {
     fn from(value: i64) -> Self {
         BasicType::Integer(value)
