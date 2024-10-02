@@ -10,6 +10,20 @@ pub trait AxumModel {
     /// Fetch the name of the column that stores the primary key for this Model
     fn primary_col() -> String;
 
+    /// Retrieves a record by its primary key and returns it as JSON.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - A reference to the `sqlx::SqlitePool` for database interaction.
+    /// * `primary_key` - The value of the primary key to search for, wrapped in `BasicType`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(axum::response::Json<Self>)` - If the record is found, it returns the record as JSON.
+    ///
+    /// # Errors
+    ///
+    /// If the operation fails, returns a tuple containing an HTTP `StatusCode` and a string message that explains what went wrong.
     async fn get_json(
         pool: &sqlx::SqlitePool,
         primary_key: BasicType,
@@ -27,6 +41,19 @@ pub trait AxumModel {
         ))
     }
 
+    /// Inserts `self` as a new record and returns it as JSON.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - A reference to the `sqlx::SqlitePool` for database interaction.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(axum::response::Json<Self>)` - Returns the newly inserted record as JSON.
+    ///
+    /// # Errors
+    ///
+    /// If the insertion fails, returns a tuple with a `StatusCode` and an error message explaining what went wrong.
     async fn post_json(
         &self,
         pool: &sqlx::SqlitePool,
@@ -44,6 +71,19 @@ pub trait AxumModel {
         ))
     }
 
+    /// Updates an existing record or inserts a new one at the specified primary key, returning the result as JSON.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - A reference to the `sqlx::SqlitePool` for database interaction.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(axum::response::Json<Self>)` - Returns the upserted record as JSON.
+    ///
+    /// # Errors
+    ///
+    /// If the operation fails, returns a tuple containing a `StatusCode` and an error message explaining the issue.
     async fn put_json(
         &self,
         pool: &sqlx::SqlitePool,
@@ -61,6 +101,21 @@ pub trait AxumModel {
         ))
     }
 
+    /// Delete records based on a specified column and value, returning the deleted records as JSON.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - A reference to the `sqlx::SqlitePool` for database interaction.
+    /// * `col` - The name of the column to filter by.
+    /// * `val` - The value of `col` to filter by, wrapped in `BasicType`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(axum::response::Json<Vec<Self>>)` - Returns the deleted records as JSON.
+    ///
+    /// # Errors
+    ///
+    /// If the operation fails, returns a tuple containing an HTTP `StatusCode` and a detailed error message describing the failure.
     async fn delete_json(
         pool: &sqlx::SqlitePool,
         col: &str,
