@@ -1,7 +1,6 @@
 mod sqlite;
 
-pub use sqlite::AxumModel as SqliteAxumModel;
-pub use sqlite::DbModel as SqliteDbModel;
+pub use sqlite::SqliteModel;
 
 use std::collections::HashMap;
 
