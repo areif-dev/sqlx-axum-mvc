@@ -1,0 +1,40 @@
+--- 
+
+name: Unit Tests 
+
+permissions:
+  contents: read
+
+on: 
+  push:
+    branches: 
+      - main
+    paths: 
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/test.yml'
+
+  pull_request:
+    branches: 
+      - main
+    paths: 
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/test.yml'
+
+  workflow_dispatch:
+
+jobs: 
+  test:
+    runs-on: ubuntu-latest 
+    env: 
+      CARGO_TERM_COLOR: always
+
+    steps: 
+      - name: Checkout 
+        uses: actions/checkout@v4 
+
+      - name: Run Unit Tests 
+        run: cargo test --verbose 
