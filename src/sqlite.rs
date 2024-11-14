@@ -1,68 +1,85 @@
+use std::fmt::Debug;
+
 use async_trait::async_trait;
+use serde::{ser::Error, Serialize};
 use sqlx::{sqlite::SqliteRow, FromRow};
 
-use crate::{BasicType, ColumnValueMap};
+use crate::BasicType;
 
 fn bind_values<'q, T>(
     query_str: &'q str,
-    vals: &'q [BasicType],
-) -> sqlx::query::QueryAs<'q, sqlx::Sqlite, T, sqlx::sqlite::SqliteArguments<'q>>
+    vals: &'q [serde_json::Value],
+) -> Option<sqlx::query::QueryAs<'q, sqlx::Sqlite, T, sqlx::sqlite::SqliteArguments<'q>>>
 where
     T: Send + 'q + for<'r> FromRow<'r, sqlx::sqlite::SqliteRow>,
 {
     let mut query = sqlx::query_as(query_str);
     for val in vals {
-        match val {
-            BasicType::Null => {
-                query = query.bind(Option::<String>::None);
-            }
-            BasicType::Integer(i) => {
-                query = query.bind(i);
-            }
-            BasicType::Real(f) => {
-                query = query.bind(f);
-            }
-            BasicType::Text(s) => {
-                query = query.bind(s);
-            }
-            BasicType::Blob(b) => {
-                query = query.bind(b);
-            }
+        query = match val_to_basic_type(val)? {
+            BasicType::Null => query.bind(Option::<String>::None),
+            BasicType::Real(f) => query.bind(f),
+            BasicType::Text(s) => query.bind(s),
+            BasicType::Blob(v) => query.bind(v),
+            BasicType::Integer(i) => query.bind(i),
+        };
+    }
+    Some(query)
+}
+
+fn val_to_basic_type(val: &serde_json::Value) -> Option<BasicType> {
+    match val {
+        serde_json::Value::Null => Some(BasicType::Null),
+        serde_json::Value::Bool(b) => Some(BasicType::Integer(if *b { 1 } else { 0 })),
+        serde_json::Value::Number(_) => val_to_basic_num(val),
+        serde_json::Value::String(s) => Some(BasicType::Text(s.to_string())),
+        serde_json::Value::Array(a) => Some(BasicType::Blob(val_to_blob(a)?)),
+        _ => None,
+    }
+}
+
+fn val_to_blob(arr: &Vec<serde_json::Value>) -> Option<Vec<u8>> {
+    let mut blob = Vec::new();
+    for el in arr {
+        let basic = val_to_basic_num(el)?;
+        match basic {
+            BasicType::Integer(i) => blob.push(u8::try_from(i).ok()?),
+            _ => return None,
         }
     }
-    query
+    Some(blob)
+}
+
+fn val_to_basic_num(val: &serde_json::Value) -> Option<BasicType> {
+    if let serde_json::Value::Number(num) = val {
+        if let Some(n) = num.as_i64() {
+            return Some(BasicType::Integer(n));
+        }
+        if let Some(n) = num.as_f64() {
+            return Some(BasicType::Real(n));
+        }
+        return None;
+    }
+    None
 }
 
 #[async_trait]
 pub trait SqliteModel {
     /// Custom error type for the model, which must implement the standard Error trait and be convertible from sqlx::Error
-    type Error: std::error::Error + From<sqlx::Error>;
+    type Error: std::error::Error + From<sqlx::Error> + From<serde_json::Error>;
 
-    /// Returns the table name associated with the model.
-    ///
-    /// # Returns
-    /// A String representing the table name.
-    fn table_name() -> String;
-
-    /// Maps the model's columns to their corresponding values.
-    ///
-    /// # Returns
-    /// - A ColumnValueMap where each key is a column name and each value is a BasicType.
-    fn map_cols_to_vals(&self) -> ColumnValueMap;
-
-    /// Creates the corresponding table for the model in the database.
-    ///
-    /// # Arguments
-    /// - pool: A reference to a sqlx::SqlitePool used for database interaction.
-    ///
-    /// # Returns
-    /// - Result<(), Self::Error>: Returns Ok if the table is created successfully, otherwise returns an error.
+    /// The name of this type in the database
     ///
     /// # Errors
-    /// - Returns Self::Error if the database operation fails.
-    async fn create_table(pool: &sqlx::SqlitePool) -> Result<(), Self::Error>
-    where
-        Self: Sized;
+    /// The default implementation parses `std::any::type_name`, and will
+    /// panic if splitting the value of `std::any::type_name` on "::" returns `None`
+    fn table_name() -> String {
+        let full_path = std::any::type_name::<Self>();
+        full_path
+            .split("::")
+            .last()
+            .expect("Failed to convert type_name to table_name")
+            .to_string()
+    }
 
     /// Inserts a new record into the table and returns the newly created model instance.
     ///
@@ -79,12 +96,21 @@ pub trait SqliteModel {
     /// - Returns Self::Error if the database operation fails.
     async fn insert(&self, pool: &sqlx::SqlitePool, skip_cols: &[&str]) -> Result<Self, Self::Error>
     where
-        Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
+        Self: Sized + for<'r> FromRow<'r, SqliteRow> + Serialize + Unpin + Send + Debug,
     {
         let mut column_names = Vec::new();
         let mut ordered_vals = Vec::new();
         let mut qmarks = Vec::new();
-        for (col, val) in self.map_cols_to_vals() {
+        let map = match serde_json::to_value(self)? {
+            serde_json::Value::Object(m) => m,
+            _ => {
+                return Err(serde_json::Error::custom(format!(
+                    "Failed to serialize {:?} into a map while running an insert query.",
+                    &self,
+                )))?
+            }
+        };
+        for (col, val) in map {
             if !skip_cols.contains(&col.as_str()) {
                 column_names.push(col.to_string());
                 ordered_vals.push(val);
@@ -97,7 +123,11 @@ pub trait SqliteModel {
             column_names.join(","),
             qmarks.join(","),
         );
-        let query = bind_values(&query_str, &ordered_vals);
+        let query =
+            bind_values(&query_str, &ordered_vals).ok_or(serde_json::Error::custom(format!(
+                "Insert query: cannot parse attributes of {:?} into Sqlite compatible types",
+                &self
+            )))?;
         Ok(query.fetch_one(pool).await?)
     }
 
@@ -122,13 +152,22 @@ pub trait SqliteModel {
         conflict_col: &str,
     ) -> Result<Self, Self::Error>
     where
-        Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
+        Self: Sized + for<'r> FromRow<'r, SqliteRow> + Serialize + Unpin + Send + Debug,
     {
         let mut column_names = Vec::new();
         let mut ordered_vals = Vec::new();
         let mut qmarks = Vec::new();
         let mut update_clause = Vec::new();
-        for (col, val) in self.map_cols_to_vals() {
+        let map = match serde_json::to_value(self)? {
+            serde_json::Value::Object(m) => m,
+            _ => {
+                return Err(serde_json::Error::custom(format!(
+                    "Failed to serialize {:?} into a map while running an upsert query.",
+                    &self
+                )))?
+            }
+        };
+        for (col, val) in map {
             if !skip_cols.contains(&col.as_str()) {
                 column_names.push(col.to_string());
                 ordered_vals.push(val);
@@ -149,7 +188,10 @@ pub trait SqliteModel {
         for _ in 0..2 {
             ordered_vals.iter().for_each(|v| vals.push(v.to_owned()));
         }
-        let query = bind_values(&query_str, &vals);
+        let query = bind_values(&query_str, &vals).ok_or(serde_json::Error::custom(format!(
+            "Upsert: cannot parse attributes of {:?} into Sqlite compatible types",
+            &self
+        )))?;
         Ok(query.fetch_one(pool).await?)
     }
 
@@ -169,7 +211,7 @@ pub trait SqliteModel {
     async fn select_one(
         pool: &sqlx::SqlitePool,
         col: &str,
-        val: BasicType,
+        val: serde_json::Value,
     ) -> Result<Self, Self::Error>
     where
         Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
@@ -180,7 +222,12 @@ pub trait SqliteModel {
             col
         );
         let vals = vec![val];
-        let query = bind_values(&query_str, &vals);
+        let query = bind_values(&query_str, &vals).ok_or(serde_json::Error::custom(format!(
+            "Select One: cannot parse {} into Sqlite compatible type",
+            &vals.get(0).ok_or(serde_json::Error::custom(
+                "select_one: vec of vals should have exactly 1 item, found none"
+            ))?
+        )))?;
         Ok(query.fetch_one(pool).await?)
     }
 
@@ -200,14 +247,19 @@ pub trait SqliteModel {
     async fn select_many(
         pool: &sqlx::SqlitePool,
         col: &str,
-        val: BasicType,
+        val: serde_json::Value,
     ) -> Result<Vec<Self>, Self::Error>
     where
         Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
     {
         let query_str = format!("select * from {} where {} = ?;", Self::table_name(), col);
         let vals = vec![val];
-        let query = bind_values(&query_str, &vals);
+        let query = bind_values(&query_str, &vals).ok_or(serde_json::Error::custom(format!(
+            "select_many: cannot parse {} into Sqlite compatible type",
+            &vals.get(0).ok_or(serde_json::Error::custom(
+                "select_many: vec of vals should have exactly 1 item, found none"
+            ))?
+        )))?;
         Ok(query.fetch_all(pool).await?)
     }
 
@@ -226,7 +278,7 @@ pub trait SqliteModel {
     async fn delete(
         pool: &sqlx::SqlitePool,
         col: &str,
-        val: BasicType,
+        val: serde_json::Value,
     ) -> Result<Vec<Self>, Self::Error>
     where
         Self: Sized + for<'r> FromRow<'r, SqliteRow> + Unpin + Send,
@@ -237,7 +289,12 @@ pub trait SqliteModel {
             col
         );
         let vals = vec![val];
-        let query = bind_values(&query_str, &vals);
+        let query = bind_values(&query_str, &vals).ok_or(serde_json::Error::custom(format!(
+            "delete: cannot parse {} into Sqlite compatible type",
+            &vals.get(0).ok_or(serde_json::Error::custom(
+                "delete: vec of vals should have extactly 1 item. Found none"
+            ))?
+        )))?;
         Ok(query.fetch_all(pool).await?)
     }
 }
@@ -245,14 +302,16 @@ pub trait SqliteModel {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use serde::Serialize;
     use sqlx::prelude::FromRow;
-
-    use crate::{BasicType, ColumnValueMap};
 
     use super::SqliteModel;
 
     #[derive(Debug)]
-    struct Error(sqlx::Error);
+    enum Error {
+        SqlxError(sqlx::Error),
+        SerdeJsonError(serde_json::Error),
+    }
 
     impl std::fmt::Display for Error {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -264,71 +323,57 @@ mod tests {
 
     impl From<sqlx::Error> for Error {
         fn from(value: sqlx::Error) -> Self {
-            Error(value)
+            Error::SqlxError(value)
         }
     }
 
-    #[derive(FromRow)]
+    impl From<serde_json::Error> for Error {
+        fn from(value: serde_json::Error) -> Self {
+            Error::SerdeJsonError(value)
+        }
+    }
+
+    #[derive(Debug, FromRow, Serialize)]
     struct TestModel {
         pub id: i64,
         pub name: String,
-        pub passwd: String,
+        pub passwd: Vec<u8>,
         pub created_at: i64,
     }
 
     #[async_trait]
     impl SqliteModel for TestModel {
         type Error = Error;
+    }
 
-        fn table_name() -> String {
-            "TestModel".to_string()
-        }
-
-        fn map_cols_to_vals(&self) -> ColumnValueMap {
-            ColumnValueMap::from([
-                ("id".to_string(), BasicType::Integer(self.id)),
-                ("name".to_string(), BasicType::Text(self.name.to_string())),
-                (
-                    "passwd".to_string(),
-                    BasicType::Text(self.passwd.to_string()),
-                ),
-                (
-                    "created_at".to_string(),
-                    BasicType::Integer(self.created_at),
-                ),
-            ])
-        }
-
-        async fn create_table(pool: &sqlx::SqlitePool) -> Result<(), Self::Error> {
-            let query_str = format!(
-                r"create table if not exists {} (
+    async fn create_table(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+        let query_str = format!(
+            r"create table if not exists TestModel (
                     id integer primary key, 
                     name text not null, 
-                    passwd text not null,
+                    passwd blob not null,
                     created_at integer not null default (strftime('%s', 'now'))
                 );",
-                Self::table_name()
-            );
+        );
 
-            sqlx::query(&query_str).execute(pool).await?;
-            Ok(())
-        }
+        sqlx::query(&query_str).execute(pool).await?;
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_create_table() {
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-        TestModel::create_table(&pool).await.unwrap();
+        create_table(&pool).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_insert() {
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-        TestModel::create_table(&pool).await.unwrap();
+        create_table(&pool).await.unwrap();
         let test = TestModel {
             id: 18,
             name: "Test".to_string(),
-            passwd: "password".to_string(),
+            passwd: vec![1, 2, 3, 4],
             created_at: 1,
         };
 
@@ -347,11 +392,11 @@ mod tests {
     #[tokio::test]
     async fn test_upsert() {
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-        TestModel::create_table(&pool).await.unwrap();
+        create_table(&pool).await.unwrap();
         let mut test = TestModel {
             id: 18,
             name: "Test".to_string(),
-            passwd: "password".to_string(),
+            passwd: vec![1, 2, 3, 4],
             created_at: 1,
         };
 
@@ -369,7 +414,7 @@ mod tests {
         test = TestModel {
             id: 1,
             name: "test".to_string(),
-            passwd: "Passwd".to_string(),
+            passwd: vec![4, 3, 2, 1, 0],
             created_at: 2,
         };
         test.upsert(&pool, &[], "id").await.unwrap();
@@ -382,13 +427,13 @@ mod tests {
         let res = res.get(0).unwrap();
         assert_eq!(res.id, 1);
         assert_eq!(res.name, "test".to_string());
-        assert_eq!(res.passwd, "Passwd".to_string());
+        assert_eq!(res.passwd, vec![4, 3, 2, 1, 0]);
         assert_eq!(res.created_at, 2);
 
         test = TestModel {
             id: 18,
             name: "another".to_string(),
-            passwd: "also".to_string(),
+            passwd: vec![9, 8, 7, 6],
             created_at: 3,
         };
         test.upsert(&pool, &[], "id").await.unwrap();
@@ -401,29 +446,27 @@ mod tests {
         let (first, sec) = (res.get(0).unwrap(), res.get(1).unwrap());
         assert_eq!(first.id, 1);
         assert_eq!(first.name, "test".to_string());
-        assert_eq!(first.passwd, "Passwd".to_string());
+        assert_eq!(first.passwd, vec![4, 3, 2, 1, 0]);
         assert_eq!(first.created_at, 2);
         assert_eq!(sec.id, 18);
         assert_eq!(sec.name, "another".to_string());
-        assert_eq!(sec.passwd, "also".to_string());
+        assert_eq!(sec.passwd, vec![9, 8, 7, 6]);
         assert_eq!(sec.created_at, 3);
     }
 
     #[tokio::test]
     async fn test_select_one() {
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-        TestModel::create_table(&pool).await.unwrap();
+        create_table(&pool).await.unwrap();
         let test = TestModel {
             id: 18,
             name: "Test".to_string(),
-            passwd: "password".to_string(),
+            passwd: vec![1, 2, 3, 4],
             created_at: 1,
         };
         test.upsert(&pool, &["id"], "id").await.unwrap();
 
-        let res = TestModel::select_one(&pool, "id", BasicType::Integer(1))
-            .await
-            .unwrap();
+        let res = TestModel::select_one(&pool, "id", 1.into()).await.unwrap();
         assert_eq!(res.id, 1);
         assert_eq!(res.name, test.name);
         assert_eq!(res.passwd, test.passwd);
@@ -433,25 +476,23 @@ mod tests {
     #[tokio::test]
     async fn test_select_many() {
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-        TestModel::create_table(&pool).await.unwrap();
+        create_table(&pool).await.unwrap();
         let test = TestModel {
             id: 18,
             name: "Test".to_string(),
-            passwd: "password".to_string(),
+            passwd: vec![1, 2, 3, 4],
             created_at: 1,
         };
         let test1 = TestModel {
             id: 18,
             name: "Test".to_string(),
-            passwd: "Password".to_string(),
+            passwd: vec![4, 3, 2, 1, 0],
             created_at: 2,
         };
         test.upsert(&pool, &["id"], "id").await.unwrap();
         test1.upsert(&pool, &["id"], "id").await.unwrap();
 
-        let res = TestModel::select_many(&pool, "id", BasicType::Integer(1))
-            .await
-            .unwrap();
+        let res = TestModel::select_many(&pool, "id", 1.into()).await.unwrap();
         assert_eq!(res.len(), 1);
         let res = TestModel::select_many(&pool, "name", "Test".into())
             .await
@@ -472,25 +513,23 @@ mod tests {
     #[tokio::test]
     async fn test_delete() {
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-        TestModel::create_table(&pool).await.unwrap();
+        create_table(&pool).await.unwrap();
         let test = TestModel {
             id: 18,
             name: "Test".to_string(),
-            passwd: "password".to_string(),
+            passwd: vec![1, 2, 3, 4, 5, 6, 7],
             created_at: 1,
         };
         let test1 = TestModel {
             id: 18,
             name: "Test".to_string(),
-            passwd: "Password".to_string(),
+            passwd: vec![4, 3, 2, 1, 0],
             created_at: 2,
         };
         test.upsert(&pool, &["id"], "id").await.unwrap();
         test1.upsert(&pool, &["id"], "id").await.unwrap();
 
-        let res = TestModel::delete(&pool, "id", BasicType::Integer(1))
-            .await
-            .unwrap();
+        let res = TestModel::delete(&pool, "id", 1.into()).await.unwrap();
         assert_eq!(res.len(), 1);
         let res = res.get(0).unwrap();
         assert_eq!(res.id, 1);
@@ -513,7 +552,7 @@ mod tests {
         let test2 = TestModel {
             id: 18,
             name: "Test".to_string(),
-            passwd: "foobar".to_string(),
+            passwd: vec![4, 8, 9, 0, 5, 6, 1, 3],
             created_at: 3,
         };
         test2.upsert(&pool, &["id"], "id").await.unwrap();
