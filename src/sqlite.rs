@@ -65,7 +65,7 @@ fn val_to_basic_num(val: &serde_json::Value) -> Option<BasicType> {
 #[async_trait]
 pub trait SqliteModel {
     /// Custom error type for the model, which must implement the standard Error trait and be convertible from sqlx::Error
-    type Error: std::error::Error + From<sqlx::Error> + From<serde_json::Error>;
+    type Error: From<sqlx::Error> + From<serde_json::Error>;
 
     /// The name of this type in the database
     ///
